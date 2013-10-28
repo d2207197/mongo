@@ -43,7 +43,6 @@ class MongoKeyPos():
     def __init__(self, poss=None, next_pos=0):
         if poss == None:
             poss = []
-
         self.poss = poss
         self.next_pos = next_pos
 
@@ -94,7 +93,11 @@ class MongoQuery():
 
     def column(self):
         # text_length = str(len(self.text))
-        return str(self.col)
+        return ''.join(map(str, self.col.poss))
+        # return str(self.col)
+
+    def length(self):
+        return self.col.next_pos
 
     def __str__(self):
         return '<\'{}\', {}, {}>'.format(self.rowkey(), self.column(), self.filters)
@@ -315,28 +318,30 @@ class Row():
         return self.count == other.count
 
     @staticmethod
-    def make_from_hbase(row ):
-        col, ngram = row[1].items()[0]
-        ngram, count = ngram.split('\t')
-        ngram = ngram.split(' ')
-        count = int(count)
+    def make_from_mongo(row):
+        # col, ngram = row[1].items()[0]
+        # ngram, count = ngram.split('\t')
+        # ngram = ngram.split(' ')
+        # count = int(count)
+        
+        # _, col = col.split(':')
+        # ngram_len, poss = col.split('-')
+        # poss = map(int, list(poss))
 
-        _, col = col.split(':')
-        ngram_len, poss = col.split('-')
-        poss = map(int, list(poss))
-        return Row(ngram, ngram_len, poss, count)
+        
+        return Row( row['ngram'].split(), row['length'], row['position'], row['count'])
 
 
 
 
-import pymongo
-mc = pymongo.MongoClient('moon.nlpweb.org')
-mc.admin.authenticate('nlplab', 'nlplab634')
+# import pymongo
+# mc = pymongo.MongoClient('moon.nlpweb.org')
+# mc.admin.authenticate('nlplab', 'nlplab634')
 import pickle
 bncwordlemma = pickle.load(open('bncwordlemma.pick'))
 
-class HBaseNgram:
-    def __init__(self, host, table):
+class Monggle:
+    def __init__(self, host, database, collection, auth_db, user, password):
         """
         HBaseNgram(host, table)
 
@@ -347,9 +352,16 @@ class HBaseNgram:
         for row in result:
              print row
         """
-        self.host = host
-        self.table = table
-        self.pool = happybase.ConnectionPool(size=20, host=host)
+        import pymongo
+        mc = pymongo.MongoClient(host)
+        mc[auth_db].authenticate(user, password)
+        self.collection = mc[database][collection]
+
+        # self.host = host
+        # self.table = table
+        
+        # self.pool = happybase.ConnectionPool(size=20, host=host)
+        
         # conn = happybase.Connection(host)
         # conn.open()
         # self._table = conn.table(table)
@@ -364,7 +376,7 @@ class HBaseNgram:
             try:
                 next = it.next
                 row = next()
-                row = Row.make_from_hbase(row)
+                row = Row.make_from_mongo(row)
                 h.append([row, filters, itnum, next])
             except StopIteration:
                 pass
@@ -383,7 +395,7 @@ class HBaseNgram:
                     if all(map(row_filter, filters)):
                         yield v
                     # raises StopIteration when exhausted
-                    s[0] = Row.make_from_hbase(next())
+                    s[0] = Row.make_from_mongo(next())
                     # restore heap condition
                     heapreplace(h, s)
                     LOGGER.debug('heap: {}'.format (h))
@@ -412,20 +424,21 @@ class HBaseNgram:
             return True
         return False
 
-    def _scan(self, query, limit):
-        with self.pool.connection() as conn:
+    def _scan(self, query):
+        # with self.pool.connection() as conn:
 
             # conn = happybase.Connection(self.host)
             # conn.open()
             # print 'scanning: {} {}'.format(query.rowkey(), query.column())
             # return self._table.scan(
 
-            rows = conn.table(self.table).scan(
-                row_prefix=query.rowkey(),
-                columns=[query.column()],
-                limit=limit,
-		batch_size=limit )
+            # rows = conn.table(self.table).scan(
+                # row_prefix=query.rowkey(),
+                # columns=[query.column()],
+                # limit=limit,
+		# batch_size=limit )
             #print 'scanned: {} {}'.format(query.rowkey(), query.column())
+        rows = self.collection.find({ 'length': query.length() , 'position': query.column(),'key': query.rowkey()}, fields = ['length', 'position', 'ngram', 'count']).sort('count', -1)
 
         return rows, query.filters
 
@@ -471,13 +484,14 @@ class HBaseNgram:
         else:
             limit_timse = 1
 
-        limited_scan = partial(self._scan, limit = limit * limit_timse)
-        from futures import ThreadPoolExecutor
+        # limited_scan = partial(self._scan, limit = limit * limit_timse)
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=20) as e:
-            results = e.map(limited_scan, querys)
+            results = e.map(self._scan, querys)
             # results =  map (limited_scan, querys)
             # LOGGER.debug('results: {}'.format(results))
-            return list(islice(self._merge(results), limit))
+            # return list(islice(self._merge(results), limit))
+            return list(self._merge(results))
     
 
 

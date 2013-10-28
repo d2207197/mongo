@@ -56,6 +56,7 @@ def parse_args():
     # parser.add_argument('-c', '--batch-count', nargs='?', const = 300, action="store", default = 300, type=int, help='Number of rows be sent to hbase per commit. Default is 300')
 
     parser.add_argument('-n', '--no-filter', action="store_true",  help='Toggle the filter')
+    parser.add_argument('-p', '--port',  nargs=1, help='mongodb port', type = int, default = 27017)
     parser.add_argument('-a', '--auth', nargs=3,  help='''mongodb authenticate information''', metavar=('AUTH_DB', 'USER', 'PASSWORD'))
 
     return  parser.parse_args()
@@ -87,7 +88,8 @@ def to_rowkey(ngram, sel):
     return selected_words
 
 def to_column(ngm_len, sel):
-    return str(ngm_len) + ':' + ''.join(map(str, sel))
+    # return str(ngm_len) + ':' + ''.join(map(str, sel))
+    return ''.join(map(str, sel))
 
 
 # lemma_names = json.load(open('wordnet_bnc_lemma_names.json'))
@@ -98,6 +100,7 @@ def ngram_filter(ngram):
     words_re = r"'?[a-zA-Z]+(['.][a-zA-Z]+)*\.?$"
     end_symbol_re = r"[-;,:.?!]$"
     any_symbol_re = r"[-;,:]$"
+    number_re = r"([0-9]+[.,])+[0-9]+$"
     sentence_tag_re = r"</?S>$"
     end_match = partial (re.match, re.compile( '|'.join([words_re, end_symbol_re, sentence_tag_re])))
     any_match = partial (re.match, re.compile( '|'.join([words_re, any_symbol_re, sentence_tag_re])))
@@ -119,31 +122,32 @@ def ngram_filter(ngram):
         return False
     return True
 
+
 def mongo_insert(collection, ngram, ngm_count, selector):
 
-        ngm_len = len(ngram)            # 5
-        # selector = range( ngm_len )     # [0,1,2,3,4]
+    ngm_len = len(ngram)            # 5
+    rowkey = to_rowkey (ngram, selector)
+    column = to_column(ngm_len, selector)
+    logging.debug( 'sel_1' + ':\t\t'.join( (str(selector), str(ngram), rowkey, column)) )
 
-        # ngm_count_pack = struct.pack('L', ngm_count) # packed
-
-        # 0 wildcard
-        # abc def ghi jkl mno
-        rowkey = to_rowkey (ngram, selector)
-        column = to_column(ngm_len, selector)
-
-        logging.debug( 'sel_1' + ':\t\t'.join( (str(selector), str(ngram), rowkey, column)) )
-        # ngramtableb.put(to_rowkey(ngram, selector, ngm_reversed_count_pack),
-                        # {to_column(ngm_len, selector): value})
-        collection.insert({"key": rowkey, "position": column, "ngram": ngram, "count": ngm_count})
-        
+    mongo_insert.batch.append({"length": ngm_len, "key": rowkey, "position": column, "ngram": ' '.join(ngram), "count": ngm_count })
+    if len(mongo_insert.batch) > 5000:
+        collection.insert(mongo_insert.batch)
+        del mongo_insert.batch 
+        mongo_insert.batch = []
 
 
+# def ngram_simplifier(ngram):
+    
+
+# {}
 if __name__ == "__main__":
+    mongo_insert.batch = []
     args = parse_args()
     # import sys
     import pymongo
 
-    mc = pymongo.Connection(args.HOST[0])
+    mc = pymongo.Connection(args.HOST[0], port = args.port[0])
 
     if args.auth:
         mc[args.auth[0]].authenticate(args.auth[1], args.auth[2])
@@ -156,100 +160,52 @@ if __name__ == "__main__":
         ngram, ngm_count = line.split('\t')
         ngm_count = int(ngm_count)
 
-        # ngm_reversed_count_pack = '|' +  struct.pack('>Q', (1<<(8*5)) - ngm_count)[3:] # pack (0xFFFFFFFFFF - ngm_count) for reversed sort
-                                                                                       # append '|' for hbase scan ENDROW.
+
         if fileinput.isfirstline():
             logging.info(ngram)
 
         ngram = ngram.split(' ')        # ['abc', 'def', 'ghi', 'jkl', 'mno']
         if not args.no_filter and not ngram_filter(ngram):
-            # logging.info('XXXX {}'.format(ngram))
             print ' '.join(ngram)
             continue
+        # ngram = ngram_simplifier(ngram)
 
         ngm_len = len(ngram)            # 5
         selector = range( ngm_len )     # [0,1,2,3,4]
 
-        # ngm_count_pack = struct.pack('L', ngm_count) # packed
-
-        # 0 wildcard
-        # abc def ghi jkl mno
-        # rowkey = to_rowkey (ngram, selector, ngm_reversed_count_pack)
-        # column = to_column(ngm_len, selector)
-        # 
-        # logging.debug( 'sel_1' + ':\t\t'.join( (str(selector), str(ngram), rowkey, column)) )
-        # ngramtableb.put(to_rowkey(ngram, selector, ngm_reversed_count_pack),
-                        # {to_column(ngm_len, selector): value})
         mongo_insert(collection, ngram, ngm_count, selector)
         
-        # batch_cnt += 1
         sel_1, sel_2, sel_3, sel_4 = [None]*4
-        # if batch_cnt >= args.batch_count:
-            # ngramtableb.send()
-            # logging.info('----> send <---- {}'.format(batch_cnt))
-            # batch_cnt = 0
-        # logging.debug('- no send - {} {}'.format(batch_cnt, args.batch_count))
-
-        # 1 wildcard
         for i in range(ngm_len):
             del sel_1
             sel_1 = copy(selector)
             sel_1.remove(i)
             if len(sel_1) == 0: break
 
-            # rowkey = to_rowkey (ngram, sel_1, ngm_reversed_count_pack)
-            # column = to_column(ngm_len, sel_1)
-            # logging.debug( 'sel_1' + ':\t\t'.join( (str(sel_1), str(ngram), rowkey, column)) )
-            # ngramtableb.put ( rowkey, {column: value })
-            # del rowkey, column
             mongo_insert(collection, ngram, ngm_count, sel_1)
 
-            # batch_cnt += 1
-            # 2 wildcard
             for j in range(i+1, ngm_len):
                 del sel_2
                 sel_2 = copy(sel_1)
                 sel_2.remove(j)
                 if len(sel_2) == 0: break
-                # logging.debug('sel_2' + ':\t\t'.join( (str(sel_2), str(ngram), str(to_rowkey(ngram, sel_2, ngm_reversed_count_pack)),to_column(ngm_len, sel_2) )) )
-                # rowkey = to_rowkey (ngram, sel_2, ngm_reversed_count_pack)
-                # column = to_column(ngm_len, sel_2)
-                # ngramtableb.put ( rowkey, {column: value })
-                # del rowkey, column
                 mongo_insert(collection, ngram, ngm_count, sel_2)
 
-                # batch_cnt += 1
-                # 3 wildcard
                 for k in range(j+1, ngm_len):
                     del sel_3
                     sel_3 = copy(sel_2)
                     sel_3.remove(k)
                     if len(sel_3) == 0: break
-
-                    # logging.debug( 'sel_3' +':\t\t'.join( (str(sel_3), str(ngram), str(to_rowkey(ngram, sel_3, ngm_reversed_count_pack)),to_column(ngm_len, sel_3))) )
-
-                    # rowkey = to_rowkey (ngram, sel_3, ngm_reversed_count_pack)
-                    # column = to_column(ngm_len, sel_3)
-                    # ngramtableb.put ( rowkey, {column: value })
-                    # del rowkey, column
                     mongo_insert(collection, ngram, ngm_count, sel_3)
-                    # batch_cnt += 1
-                    # 4 wildcard
+
                     for l in range(k+1, ngm_len):
                         del sel_4
                         sel_4 = copy(sel_3)
                         sel_4.remove(l)
                         if len(sel_4) == 0: break
-                        # logging.debug( 'sel_4' +':\t\t'.join( (str(sel_4), str(ngram), str(to_rowkey(ngram, sel_4, ngm_reversed_count_pack)), to_column(ngm_len, sel_4 )) ) )
-
-                        # rowkey = to_rowkey (ngram, sel_4, ngm_reversed_count_pack)
-                        # column = to_column(ngm_len, sel_4)
-                        # ngramtableb.put ( rowkey, {column: value })
-                        # del rowkey, column
                         mongo_insert(collection, ngram, ngm_count, sel_4)
-                        # batch_cnt += 1
 
 
 
-    # ngramtableb.send()
-    # logging.info('----> send <---- {}'.format(batch_cnt))
+
+
