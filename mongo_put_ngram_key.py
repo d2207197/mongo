@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 '''
 Put ngram and count to HBase.
 
@@ -51,6 +52,7 @@ def parse_args():
     parser.add_argument('HOST', nargs=1, help='mongodb server hostname')
     parser.add_argument('DATABASE', nargs=1, help='mongodb database name')
     parser.add_argument('COLLECTION', nargs=1, help='mongodb collection name')
+    parser.add_argument('UNIGRAM', nargs=1, help='unigram')
     parser.add_argument('FILES', nargs='*', help='''input files.
     With no FILE, or when FILE is -, read standard input''', default='-')
     # parser.add_argument('-c', '--batch-count', nargs='?', const = 300, action="store", default = 300, type=int, help='Number of rows be sent to hbase per commit. Default is 300')
@@ -123,45 +125,83 @@ def ngram_filter(ngram):
     return True
 
 
-def mongo_insert(collection, ngram, ngm_count, selector):
+from bson.binary import Binary
+import struct
+# def words_to_idxes_binary(uni_collection, words):
+#     idxes = [ uni_collection.find_one({'unigram': word}, fields= {'_id': False, 'idx': True})['idx'] for word in words ]
+#     return Binary(''.join([ struct.pack('>L', idx)  for idx in idxes ]))
 
+def words_to_idxes_binary( words):
+    global uni_idx_map
+    idxes = [  uni_idx_map[word] for word in words ]
+    return Binary(''.join([ struct.pack('>L', idx)  for idx in idxes ]))
+
+
+def mongo_insert(collection, uni_collection, ngram, ngm_count, selector):
     ngm_len = len(ngram)            # 5
     rowkey = to_rowkey (ngram, selector)
-    column = to_column(ngm_len, selector)
-    logging.debug( 'sel_1' + ':\t\t'.join( (str(selector), str(ngram), rowkey, column)) )
+    rowkey_binary = words_to_idxes_binary(rowkey.split() )
+    logging.debug( 'rowkey transform: {} ---> {}' .format( rowkey, rowkey_binary) )
 
-    mongo_insert.batch.append({"length": ngm_len, "key": rowkey, "position": column, "ngram": ' '.join(ngram), "count": ngm_count })
+    column = to_column(ngm_len, selector)
+    logging.debug( 'sel' + ':\t\t'.join( (str(selector), str(ngram), rowkey, column)) )
+
+    mongo_insert.batch.append({"length": ngm_len, "key": rowkey_binary, "position": column, "ngram": words_to_idxes_binary( ngram), "count": ngm_count })
     if len(mongo_insert.batch) > 5000:
+        logging.info( 'insert {} records'.format(len(mongo_insert.batch)))
         collection.insert(mongo_insert.batch)
         del mongo_insert.batch 
         mongo_insert.batch = []
 
-
 # def ngram_simplifier(ngram):
-    
+
 
 # {}
 if __name__ == "__main__":
     mongo_insert.batch = []
     args = parse_args()
-    # import sys
+    import sys
     import pymongo
 
-    mc = pymongo.Connection(args.HOST[0], port = args.port[0])
+    mc = pymongo.Connection(args.HOST[0], port = args.port)
 
     if args.auth:
         mc[args.auth[0]].authenticate(args.auth[1], args.auth[2])
 
-    
+
+    uni_collection = mc[args.DATABASE[0]][args.COLLECTION[0] + '_unigram']
+    global uni_idx_map
+    uni_idx_map = {}
+    idx_uni_map = {}
     collection = mc[args.DATABASE[0]][args.COLLECTION[0]]
 
+
+    from bson.binary import Binary
+    import struct
+    for idx, line in enumerate( fileinput.input(args.UNIGRAM[0])):
+        unigram, ngm_count = line.strip().split('\t')
+        ngm_count = int(ngm_count)
+        # binary = Binary(struct.pack('>L', idx) )
+        uni_collection.insert({"unigram": unigram, 'idx': idx, 'count': ngm_count})
+        uni_idx_map[unigram] = idx
+        idx_uni_map[idx] = unigram
+    import pickle
+    with open('unigram_index.pkl', 'wb') as pickle_file:
+        pickle.dump(uni_idx_map, pickle_file)
+    with open('index_unigram.pkl', 'wb') as pickle_file:
+        pickle.dump(idx_uni_map, pickle_file)
+
+    # sys.exit(0)
+
     for line in fileinput.input(args.FILES):
+
         value = line.strip()
         ngram, ngm_count = line.split('\t')
         ngm_count = int(ngm_count)
 
 
         if fileinput.isfirstline():
+            logging.info('start inserting file: {}'.format(fileinput.filename()))
             logging.info(ngram)
 
         ngram = ngram.split(' ')        # ['abc', 'def', 'ghi', 'jkl', 'mno']
@@ -173,7 +213,10 @@ if __name__ == "__main__":
         ngm_len = len(ngram)            # 5
         selector = range( ngm_len )     # [0,1,2,3,4]
 
-        mongo_insert(collection, ngram, ngm_count, selector)
+        if not all(word in uni_idx_map for word in ngram ):
+            # logging.info('reject {}'.format(ngram))
+            continue
+        mongo_insert(collection, uni_collection, ngram, ngm_count, selector)
         
         sel_1, sel_2, sel_3, sel_4 = [None]*4
         for i in range(ngm_len):
@@ -182,28 +225,33 @@ if __name__ == "__main__":
             sel_1.remove(i)
             if len(sel_1) == 0: break
 
-            mongo_insert(collection, ngram, ngm_count, sel_1)
+            mongo_insert(collection, uni_collection, ngram, ngm_count, sel_1)
 
             for j in range(i+1, ngm_len):
                 del sel_2
                 sel_2 = copy(sel_1)
                 sel_2.remove(j)
                 if len(sel_2) == 0: break
-                mongo_insert(collection, ngram, ngm_count, sel_2)
+                mongo_insert(collection, uni_collection, ngram, ngm_count, sel_2)
 
                 for k in range(j+1, ngm_len):
                     del sel_3
                     sel_3 = copy(sel_2)
                     sel_3.remove(k)
                     if len(sel_3) == 0: break
-                    mongo_insert(collection, ngram, ngm_count, sel_3)
+                    mongo_insert(collection, uni_collection, ngram, ngm_count, sel_3)
 
                     for l in range(k+1, ngm_len):
                         del sel_4
                         sel_4 = copy(sel_3)
                         sel_4.remove(l)
                         if len(sel_4) == 0: break
-                        mongo_insert(collection, ngram, ngm_count, sel_4)
+                        mongo_insert(collection, uni_collection, ngram, ngm_count, sel_4)
+                        
+    logging.info( 'insert {} records'.format(len(mongo_insert.batch)))
+    collection.insert(mongo_insert.batch)
+    del mongo_insert.batch 
+    mongo_insert.batch = []
 
 
 
