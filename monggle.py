@@ -34,7 +34,28 @@ LOGGER.addHandler(CH)
 
 
 
+from bson.binary import Binary
+import struct
 
+
+
+with open('unigram_index.pkl',  'rb') as pickle_file:
+    import pickle
+    global uni_idx_map
+    uni_idx_map = pickle.load(pickle_file)
+with open('index_unigram.pkl',  'rb') as pickle_file:
+    import pickle
+    global idx_uni_map
+    idx_uni_map = pickle.load(pickle_file)
+
+def words_to_idxes_binary( words):
+    global uni_idx_map
+    idxes = [  uni_idx_map[word] for word in words ]
+    return Binary(''.join([ struct.pack('>L', idx)  for idx in idxes ]))
+
+def idxes_binary_to_words(binary):
+    idxes = [ struct.unpack('>L', binary[i*4:i*4+4])[0] for i in range(len(binary)/4)]
+    return [ idx_uni_map[idx] for idx in idxes ]
 
 class MongoKeyPos():
     '''
@@ -88,8 +109,10 @@ class MongoQuery():
         return MongoQuery(self.text, self.col, self.filters)
         # elif name == 'next_pos': self[2] = value
 
+
     def rowkey(self):
-        return ' '.join(self.text)
+        # return ' '.join(self.text)
+        return words_to_idxes_binary(self.text)
 
     def column(self):
         # text_length = str(len(self.text))
@@ -104,7 +127,6 @@ class MongoQuery():
 
     def __repr__(self):
         return self.__str__()
-
 
 
 class Alternatives():
@@ -329,7 +351,7 @@ class Row():
         # poss = map(int, list(poss))
 
         
-        return Row( row['ngram'].split(), row['length'], row['position'], row['count'])
+        return Row( idxes_binary_to_words(row['ngram']), row['length'], row['position'], row['count'])
 
 
 
@@ -341,20 +363,21 @@ import pickle
 bncwordlemma = pickle.load(open('bncwordlemma.pick'))
 
 class Monggle:
-    def __init__(self, host, database, collection, auth_db, user, password):
+    def __init__(self, host, database, collection, auth_db = None , user = None, password = None):
         """
-        HBaseNgram(host, table)
+        Monggle(host, table)
 
         return a HBaseNgram object with query() method.
 
-        bnchb = HBaseNgram('hadoop.nlpweb.org', 'bnc-all-cnt-ngram')
+        bnchb = Monggle('hadoop.nlpweb.org', 'ngrams', 'AAN2013')
         result = bnchb.query('play * ?* role', limit = 10)
         for row in result:
              print row
         """
         import pymongo
         mc = pymongo.MongoClient(host)
-        mc[auth_db].authenticate(user, password)
+        if auth_db:
+            mc[auth_db].authenticate(user, password)
         self.collection = mc[database][collection]
 
         # self.host = host
@@ -424,7 +447,7 @@ class Monggle:
             return True
         return False
 
-    def _scan(self, query):
+    def _scan(self, query, limit = 0):
         # with self.pool.connection() as conn:
 
             # conn = happybase.Connection(self.host)
@@ -438,7 +461,7 @@ class Monggle:
                 # limit=limit,
 		# batch_size=limit )
             #print 'scanned: {} {}'.format(query.rowkey(), query.column())
-        rows = self.collection.find({ 'length': query.length() , 'position': query.column(),'key': query.rowkey()}, fields = ['length', 'position', 'ngram', 'count']).sort('count', -1)
+        rows = self.collection.find({ 'length': query.length() , 'position': query.column(),'key': query.rowkey()}, fields = ['length', 'position', 'ngram', 'count'], limit = limit).sort('count', -1)
 
         return rows, query.filters
 
@@ -484,10 +507,11 @@ class Monggle:
         else:
             limit_timse = 1
 
-        # limited_scan = partial(self._scan, limit = limit * limit_timse)
+        limited_scan = partial(self._scan, limit = limit * limit_timse)
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=20) as e:
-            results = e.map(self._scan, querys)
+            # results = e.map(self._scan, querys)
+            results = e.map(limited_scan, querys)
             # results =  map (limited_scan, querys)
             # LOGGER.debug('results: {}'.format(results))
             # return list(islice(self._merge(results), limit))
